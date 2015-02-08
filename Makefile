@@ -11,6 +11,7 @@ build:
 clean:
 	make -C /lib/modules/$(KERN_VER)/build M=$(PWD) clean
 	rm -f $(PWD)/network_counter.ko
+	rm -f $(PWD)/network_counter.gz
 
 test:
 	make -C /lib/modules/$(KERN_VER)/build M=$(PWD) install

@@ -14,22 +14,13 @@
 #include <linux/proc_fs.h>
 #include <asm/errno.h>
 
-
 #define FILE_NAME "network_counter"
-
-#define skb_data_len(skb) ((int)(skb -> tail - skb -> data))
-#define check_interface(interface, filter) ((strcmp(filter, "") == 0)  || \
-                                            (strcmp(filter, "*") == 0) || \
-                                            (strcmp(filter, interface) == 0))
-
-#define check_port(port, filter) ((filter < 1) || (port == filter))
-
-#define RW_MODE_PARAM (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Edward Sargsyan");
 MODULE_DESCRIPTION("Network counting module");
 
+#define RW_MODE_PARAM (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP)
 static int port = -1; // All
 module_param(port, int, RW_MODE_PARAM);
 MODULE_PARM_DESC(port, "Port to monitor. If value is less than 1, all ports will be monitored");
@@ -52,13 +43,28 @@ int is_tcp_soket(struct sk_buff* skb);
 int get_port(   struct  sk_buff* skb,
                 int     src_dest /* 0 == src, 1 == dest */);
 
+#define skb_data_len(skb) ((int)(skb -> tail - skb -> data))
+#define check_interface(interface, filter) ((strcmp(filter, "") == 0)  || \
+                                            (strcmp(filter, "*") == 0) || \
+                                            (strcmp(filter, interface) == 0))
+
+#define check_port(port, filter) ((filter < 1) || (port == filter))
+
+
+/*
+ *  The function will be called when a packed has
+ *  been arrived to the system.
+ */
 unsigned int hook_rx_fn(unsigned int hooknum,
                         struct sk_buff* skb,
                         const struct net_device* in,
                         const struct net_device* out,
                         int (*okfn)(struct sk_buff*));
 
-
+/*
+ *  The function will be called when packet
+ *  is prepared ans is going to be sent.
+ */
 unsigned int hook_tx_fn(unsigned int hooknum,
                         struct sk_buff* skb,
                         const struct net_device* in,
@@ -67,38 +73,80 @@ unsigned int hook_tx_fn(unsigned int hooknum,
 
 int procfs_open_fn(struct inode *inode, struct file *fp);
 
+/*
+ * Writes to usage statistics to the buffer from userspace
+/*/
 ssize_t procfs_read_fn( struct file*    fp,
                         char __user *   buffer,
                         size_t          lenght,
                         loff_t*         offset);
-
+/*
+ * Reads parameters from user space.
+ * Parameters format is: iface: <name> port: <num>
+ * If value of parameter iface is * all interfaces will be accepted
+ * If value of port is < 1, then all ports will be accepted
+ */
 ssize_t procfs_write_fn( struct file*        fp,
                          const char __user * buffer,
                          size_t              lenght,
                          loff_t*             offset);
 
-
+/*
+ * Closes file in procfs for user.
+ */
 static int procfs_release_fn(struct inode *inode, struct file *fp);
-unsigned int make_human_readable(unsigned int bytes, const char** pf);
 
-static unsigned int packets_received = 0;
-static unsigned int data_received = 0;
-static unsigned int packets_transmitted = 0;
-static unsigned int data_transmitted = 0;
+/*
+ * Stores printable values of TX/XR traffic.
+ */
+struct hr_t
+{
+    u64 integer;
+    u8  fractional;
+};
+
+
+/*
+ * Convers bytes count to more readable format. For example 2500 -> 2.5KB
+ */
+void make_human_readable(const u64 bytes, const char** pf, struct hr_t* hr);
+
+
+/* Counters: */
+static u64 packets_received = 0;
+static u64 data_received = 0;
+static u64 packets_transmitted = 0;
+static u64 data_transmitted = 0;
+
+
+/* netfilter data */
 static struct nf_hook_ops hook_tx;
 static struct nf_hook_ops hook_rx;
+
+/* procfs file */
 static struct proc_dir_entry *proc_file;
 
+
+/*
+ * I/O buffers
+ */
 static char   proc_fs_buff_r[PROC_FS_BUFFER_LEN];
 static char   proc_fs_buff_w[PROC_FS_BUFFER_LEN];
 static int    proc_fs_file_opened = 0;
 
+
+/*
+ * Human readable postfixes.
+ */
 static const char* EMPTY_PF = "";
 static const char* BYTES_PF = "b";
 static const char* KBYTES_PF = "KB";
 static const char* MBYTES_PF = "MB";
 static const char* GBYTES_PF = "GB";
 
+/*
+ * Procfs file_ops. Open/Read/Wrtie/Close callbacks
+ */
 static const struct file_operations proc_file_ops = 
 {
     .owner = THIS_MODULE,
@@ -108,6 +156,10 @@ static const struct file_operations proc_file_ops =
     .release = procfs_release_fn
 };
 
+/*
+ * Checks ne socket type.
+ * Return 0 if socket is not TCP or input is invalid
+ */
 int is_tcp_soket(struct sk_buff* skb)
 {   
     if(skb == NULL)
@@ -119,6 +171,11 @@ int is_tcp_soket(struct sk_buff* skb)
     return 1;
 }
 
+
+/*
+ * Extracts port info from socket data.
+ * Returns 0 if input is invalid or port info is missed
+ */
 int get_port(   struct  sk_buff* skb,
                 int     src_dest /* 0 == src, 1 == dest */)
 {
@@ -188,32 +245,48 @@ int procfs_open_fn(struct inode *inode, struct file *fp)
     return 0;
 }
 
-unsigned int make_human_readable(unsigned int bytes, const char** pf)
+void make_human_readable(const u64 bytes, const char** pf, struct hr_t* hr)
 {
-    unsigned int b = bytes / 1000;
-    if(bytes < 1024)
+    u64 b = bytes;
+    if(bytes < (u64)1024)
     {
         *pf = BYTES_PF;
-        return bytes; 
+        hr->integer = b;
+        hr->fractional = 0;
+        return; 
 	}
 
-    b = bytes / 1000;
-	if(b < 1024)
+    b = bytes;
+    do_div(b, (u64)1000);
+	if(b < (u64)1024)
     {
         *pf = KBYTES_PF;
-        return b;
+        hr->integer = b;
+        b = bytes;
+        do_div(b, (u64)100);
+        hr->fractional = (unsigned int)b % 10;
+        return;
     }
 
-    b = bytes / 1000000;
-    if(b < 1024)
+    b = bytes;
+    do_div(b, (u64)1000000);
+    if(b < (u64)1024)
     {
         *pf = MBYTES_PF;
-        return b;
+        hr->integer = b;
+        b = bytes;
+        do_div(b, 100000);
+        hr->fractional = (unsigned int)b % 10;
+        return;
     }
 
-    b = bytes / 1000000000;
+    b = bytes;
+    do_div(b, (u64)1000000000);
+    hr->integer = b;
+    b = bytes;
+    do_div(b, (u64)100000000);
+    hr->fractional = (unsigned int)b % 10;
     *pf = GBYTES_PF;
-    return b;
 }
 
 ssize_t procfs_read_fn( struct file*    fp,
@@ -226,9 +299,13 @@ ssize_t procfs_read_fn( struct file*    fp,
     int buff_len;
     const char* TX_pf = EMPTY_PF;
     const char* RX_pf = EMPTY_PF;
-    unsigned int TX = data_transmitted;
-    unsigned int RX = data_received;
     
+    struct hr_t TX;
+    struct hr_t RX;
+    TX.integer = data_transmitted;
+    TX.fractional = 0;
+    RX.integer = data_received;
+    RX.fractional = 0;
 
     if(finished)
     {
@@ -240,17 +317,32 @@ ssize_t procfs_read_fn( struct file*    fp,
     
     if(human_readable)
     {
-        TX = make_human_readable(TX, &TX_pf);
-        RX = make_human_readable(RX, &RX_pf);
+        make_human_readable(TX.integer, &TX_pf, &TX);
+        make_human_readable(RX.integer, &RX_pf, &RX);
     }
 
 
-    printk("Bytes tx: %u rx %u\n", data_transmitted, data_received);
-    buff_len = snprintf( proc_fs_buff_r, PROC_FS_BUFFER_LEN,
-                         "iface:\t%s\tport:\t%d\nTX(packets):\t%u\tRX(packets):\t%u\nTX:\t%u%s\tRX:\t%u%s\n",
-                         iface, port,
-                         packets_transmitted, packets_received,
-                         TX, TX_pf, RX, RX_pf);
+    printk("Bytes tx: %llu rx %llu\n", data_transmitted, data_received);
+    
+    
+    if(human_readable)
+    {
+        buff_len = snprintf( proc_fs_buff_r, PROC_FS_BUFFER_LEN,
+                             "iface:\t%s\tport:\t%d\nTX(packets):\t%llu\tRX(packets):\t%llu\nTX:\t%llu.%d%s\tRX:\t%llu.%d%s\n",
+                             iface, port,
+                             packets_transmitted, packets_received,
+                             TX.integer, TX.fractional, TX_pf,
+                             RX.integer, RX.fractional, RX_pf);
+
+    }
+    else
+    {
+        buff_len = snprintf( proc_fs_buff_r, PROC_FS_BUFFER_LEN,
+                             "iface:\t%s\tport:\t%d\nTX(packets):\t%llu\tRX(packets):\t%llu\nTX:\t%llu%s\tRX:\t%llu%s\n",
+                             iface, port,
+                             packets_transmitted, packets_received,
+                             TX.integer, TX_pf, RX.integer, RX_pf);
+    }
 
     if(offset != NULL)
         buff_len -= *offset;
@@ -319,6 +411,10 @@ static int procfs_release_fn(struct inode *inode, struct file *fp)
     return 0;
 }
 
+
+/*
+ * Initiazes the module
+ */
 static int __init cm_init(void)
 {
     printk("Initing network_counter module");
@@ -348,6 +444,10 @@ static int __init cm_init(void)
     return 0;
 }
 
+
+/*
+ * Releases the module
+ */ 
 static void __exit cm_exit(void)
 {
     nf_unregister_hook(&hook_rx);
